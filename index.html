@@ -1,0 +1,1272 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>やさしい日常 × 歪む夜</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1c1410;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'MS Gothic', 'ＭＳ ゴシック', 'Courier New', monospace;
+    }
+    #title {
+      color: #d4a870;
+      font-size: 12px;
+      letter-spacing: 5px;
+      margin-bottom: 10px;
+      text-shadow: 0 0 24px rgba(200,130,60,0.4);
+    }
+    #game-wrapper {
+      border: 2px solid #5a3e20;
+      box-shadow: 0 0 40px rgba(180,110,40,0.18), 0 0 80px rgba(100,60,20,0.12);
+      image-rendering: pixelated;
+    }
+    #hint {
+      color: #5a4030;
+      font-size: 10px;
+      letter-spacing: 2px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="title">やさしい日常 &times; 歪む夜</div>
+  <div id="game-wrapper"></div>
+  <div id="hint">[ ↑↓←→ / WASD ] 移動　　[ F / Space ] 調べる</div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <script>
+'use strict';
+
+const GW = 640, GH = 480;
+const WALL_Y = 152;
+const DAY_DURATION = 30000;
+
+// ── Drawing helpers ─────────────────────────────────────
+
+// 木の縦目 (木目調テクスチャ)
+function woodGrainV(g, x, y, w, h, col, alpha) {
+  g.fillStyle(col, alpha);
+  for (let i = 3; i < w - 2; i += 5) {
+    const wv = Math.sin(i * 0.37 + y * 0.09) * 3;
+    g.fillRect(x + i, y + Math.max(0, wv), 1, h - Math.abs(wv) * 2);
+  }
+}
+
+// ピクセルアートの面取り (上/左: ハイライト, 下/右: 影)
+function bevel(g, x, y, w, h, hiC, loC, thick) {
+  const t = thick || 2;
+  g.fillStyle(hiC);
+  g.fillRect(x, y, w, t);
+  g.fillRect(x, y + t, t, h - t * 2);
+  g.fillStyle(loC);
+  g.fillRect(x, y + h - t, w, t);
+  g.fillRect(x + w - t, y + t, t, h - t * 2);
+}
+
+// ピクセルアート小物用 単純な輪郭
+function outline(g, x, y, w, h, col) {
+  g.fillStyle(col);
+  g.fillRect(x, y, w, 1);
+  g.fillRect(x, y + h - 1, w, 1);
+  g.fillRect(x, y + 1, 1, h - 2);
+  g.fillRect(x + w - 1, y + 1, 1, h - 2);
+}
+
+// ─────────────────────────────────────────
+//  GameScene
+// ─────────────────────────────────────────
+class GameScene extends Phaser.Scene {
+  constructor() { super({ key: 'GameScene' }); }
+
+  create() {
+    this.state       = 'day';
+    this.anomalyType = null;
+    this.playerX     = GW / 2;
+    this.playerY     = GH / 2 + 55;
+    this.walkTimer   = 0;
+    this.walkStep    = 0;
+
+    // グラフィックレイヤー
+    this.gRoom   = this.add.graphics().setDepth(0);
+    this.gObj    = this.add.graphics().setDepth(1);
+    this.gPlayer = this.add.graphics().setDepth(3);
+    this.nightVeil = this.add.rectangle(GW/2, GH/2, GW, GH, 0x04030c, 0).setDepth(5);
+
+    this.createUI();
+
+    // キー入力
+    this.cursors = this.input.keyboard.createCursorKeys();
+    this.keyW = this.input.keyboard.addKey('W');
+    this.keyA = this.input.keyboard.addKey('A');
+    this.keyS = this.input.keyboard.addKey('S');
+    this.keyD = this.input.keyboard.addKey('D');
+    this.keyF = this.input.keyboard.addKey('F');
+    this.keySPC = this.input.keyboard.addKey('SPACE');
+
+    this.drawRoom(false);
+    this.drawObjects(false, null);
+    this.drawPlayer(false, 0);
+    this.scheduleDayToNight();
+
+    // 夜のちらつき
+    this.time.addEvent({
+      delay: 110, loop: true,
+      callback: () => {
+        if (this.state === 'night') {
+          const a = 0.72 + (Math.random() - 0.5) * 0.06;
+          this.nightVeil.setFillStyle(0x04030c, a);
+        }
+      }
+    });
+
+    this.showMsg('おはようございます。\nいつもの、やさしい朝。', 3500);
+  }
+
+  scheduleDayToNight() {
+    this.dayTimer = this.time.delayedCall(DAY_DURATION, () => {
+      if (this.state === 'day') this.startNight();
+    });
+  }
+
+  // ─────────────────────────────────────────
+  //  部屋の描画
+  // ─────────────────────────────────────────
+  drawRoom(night) {
+    const g = this.gRoom;
+    g.clear();
+    this._drawFloor(g, night);
+    this._drawWall(g, night);
+    this._drawRug(g, night);
+    this._drawWindow(g, night);
+    this._drawWallDeco(g, night);
+    this._drawClock(g, GW - 82, 56, night);
+  }
+
+  _drawFloor(g, night) {
+    if (night) {
+      g.fillStyle(0x0c0a18);
+      g.fillRect(0, WALL_Y, GW, GH - WALL_Y);
+      g.fillStyle(0x090716, 0.7);
+      for (let y = WALL_Y + 42; y < GH; y += 42) g.fillRect(0, y, GW, 1);
+      return;
+    }
+
+    // 昼: 暖かい木の床 (3色の板目)
+    const planks = [0xdaac72, 0xca9650, 0xd4a468, 0xbe8c42, 0xd0a060, 0xc8984e];
+    for (let i = 0; i < 8; i++) {
+      g.fillStyle(planks[i % planks.length]);
+      g.fillRect(0, WALL_Y + i * 42, GW, 42);
+    }
+    // 横目地
+    g.fillStyle(0xa07030, 0.45);
+    for (let y = WALL_Y + 42; y < GH; y += 42) g.fillRect(0, y, GW, 1);
+    g.fillStyle(0xb88040, 0.12);
+    for (let y = WALL_Y + 21; y < GH; y += 42) g.fillRect(0, y, GW, 1);
+    // 縦目地 (千鳥格子)
+    g.fillStyle(0x9a6828, 0.28);
+    for (let row = 0; row < 9; row++) {
+      const off = (row % 2) * 44;
+      for (let x = off; x < GW; x += 88) g.fillRect(x, WALL_Y + row * 42, 1, 42);
+    }
+    // 木目
+    woodGrainV(g, 0, WALL_Y, GW, GH - WALL_Y, 0x9a6430, 0.10);
+
+    // 幅木
+    g.fillStyle(0xe8d4a8);
+    g.fillRect(0, WALL_Y + 1, GW, 6);
+    g.fillStyle(0xc8aa78);
+    g.fillRect(0, WALL_Y + 6, GW, 3);
+    g.fillStyle(0xf8ecca);
+    g.fillRect(0, WALL_Y + 1, GW, 1);
+  }
+
+  _drawWall(g, night) {
+    if (night) {
+      g.fillStyle(0x161228);
+      g.fillRect(0, 0, GW, WALL_Y);
+      g.fillStyle(0x201a38, 0.3);
+      for (let y = 16; y < WALL_Y; y += 28) g.fillRect(0, y, GW, 1);
+      return;
+    }
+
+    // 昼: クリーム壁紙
+    g.fillStyle(0xf2e2c8);
+    g.fillRect(0, 0, GW, WALL_Y);
+    // 壁紙の横ストライプ (薄い)
+    g.fillStyle(0xe8d4b0, 0.45);
+    for (let y = 0; y < WALL_Y; y += 28) g.fillRect(0, y, GW, 1);
+
+    // 壁紙の小さなひし形ドット模様
+    g.fillStyle(0xe0ccaa, 0.6);
+    for (let y = 10; y < WALL_Y; y += 28) {
+      const ox = (((y - 10) / 28) % 2 === 0) ? 0 : 20;
+      for (let x = ox; x < GW; x += 40) {
+        g.fillRect(x + 1, y,     4, 1);
+        g.fillRect(x,     y + 1, 6, 1);
+        g.fillRect(x + 1, y + 2, 4, 1);
+      }
+    }
+
+    // 壁の縦影 (コーナー)
+    g.fillStyle(0xd8c4a0, 0.4);
+    g.fillRect(0, 0, 8, WALL_Y);
+    g.fillRect(GW - 8, 0, 8, WALL_Y);
+
+    // 幅木上端ライン
+    g.fillStyle(0xc8aa80);
+    g.fillRect(0, WALL_Y - 1, GW, 1);
+  }
+
+  _drawRug(g, night) {
+    const rx = 168, ry = 265, rw = 308, rh = 155;
+    if (night) {
+      g.fillStyle(0x1e0e1c);
+      g.fillRect(rx, ry, rw, rh);
+      g.fillStyle(0x180c18);
+      g.fillRect(rx + 10, ry + 10, rw - 20, rh - 20);
+      return;
+    }
+
+    // メインのラグ
+    g.fillStyle(0xc87260);
+    g.fillRect(rx, ry, rw, rh);
+
+    // 内側の色
+    g.fillStyle(0xb86050);
+    g.fillRect(rx + 10, ry + 10, rw - 20, rh - 20);
+
+    // 中央パネル
+    g.fillStyle(0xd88070);
+    g.fillRect(rx + 22, ry + 22, rw - 44, rh - 44);
+
+    // ボーダーライン
+    g.fillStyle(0xe49080);
+    g.fillRect(rx, ry, rw, 4);
+    g.fillRect(rx, ry + rh - 4, rw, 4);
+    g.fillRect(rx, ry, 4, rh);
+    g.fillRect(rx + rw - 4, ry, 4, rh);
+
+    // 内ボーダー
+    g.fillStyle(0xa85040, 0.6);
+    g.fillRect(rx + 12, ry + 12, rw - 24, 2);
+    g.fillRect(rx + 12, ry + rh - 14, rw - 24, 2);
+    g.fillRect(rx + 12, ry + 14, 2, rh - 28);
+    g.fillRect(rx + rw - 14, ry + 14, 2, rh - 28);
+
+    // 中央の小花模様 (ドットで表現)
+    g.fillStyle(0xe49880);
+    const cx = rx + rw / 2, cy = ry + rh / 2;
+    for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
+      const fx = cx + Math.cos(angle) * 22, fy = cy + Math.sin(angle) * 14;
+      g.fillRect(fx - 2, fy - 2, 5, 5);
+    }
+    g.fillRect(cx - 3, cy - 3, 7, 7);
+
+    // フリンジ
+    g.fillStyle(0xd89070);
+    for (let x = rx + 8; x < rx + rw; x += 8) {
+      g.fillRect(x, ry - 3, 3, 4);
+      g.fillRect(x, ry + rh, 3, 4);
+    }
+    for (let y = ry + 8; y < ry + rh; y += 8) {
+      g.fillRect(rx - 3, y, 4, 3);
+      g.fillRect(rx + rw, y, 4, 3);
+    }
+  }
+
+  _drawWindow(g, night) {
+    const wx = 216, wy = 10, ww = 172, wh = 128;
+    // カーテン (両サイド)
+    this._drawCurtains(g, wx, wy, ww, wh, night);
+
+    if (night) {
+      // 夜空
+      g.fillStyle(0x04021a);
+      g.fillRect(wx + 4, wy + 4, ww - 8, wh - 8);
+      // 月明かりのグラデーション (上部に明るみ)
+      g.fillStyle(0x0c0840, 0.4);
+      g.fillRect(wx + 4, wy + 4, ww - 8, (wh - 8) / 2);
+      // 星
+      g.fillStyle(0xdce0f8, 0.9);
+      const stars = [
+        [wx+18,wy+16],[wx+70,wy+10],[wx+108,wy+34],[wx+40,wy+52],
+        [wx+128,wy+20],[wx+28,wy+82],[wx+86,wy+74],[wx+118,wy+62],
+        [wx+55,wy+30],[wx+148,wy+48],
+      ];
+      for (const [sx,sy] of stars) g.fillRect(sx, sy, 2, 2);
+      // 輝く星
+      g.fillStyle(0xffffff, 0.8);
+      g.fillRect(wx+70, wy+10, 2, 2);
+      g.fillRect(wx+40, wy+52, 2, 2);
+      // 三日月
+      g.fillStyle(0xd8dce8);
+      g.fillCircle(wx + ww - 30, wy + 28, 22);
+      g.fillStyle(0x04021a);
+      g.fillCircle(wx + ww - 22, wy + 24, 18);
+    } else {
+      // 昼空
+      g.fillStyle(0xb0d8f8);
+      g.fillRect(wx + 4, wy + 4, ww - 8, wh - 8);
+      // 上部を明るく
+      g.fillStyle(0xd4ecfc, 0.5);
+      g.fillRect(wx + 4, wy + 4, ww - 8, (wh - 8) / 2);
+      // 小さな雲
+      g.fillStyle(0xffffff, 0.85);
+      g.fillRect(wx + 20, wy + 40, 36, 10);
+      g.fillRect(wx + 16, wy + 44, 44, 8);
+      g.fillRect(wx + 24, wy + 36, 22, 8);
+      g.fillStyle(0xf0f8ff, 0.5);
+      g.fillRect(wx + 90, wy + 58, 28, 8);
+      g.fillRect(wx + 87, wy + 62, 34, 6);
+      // 太陽
+      g.fillStyle(0xffe878, 0.95);
+      g.fillCircle(wx + ww - 28, wy + 28, 20);
+      g.fillStyle(0xfff4a0, 0.35);
+      g.fillCircle(wx + ww - 28, wy + 28, 30);
+
+      // 差し込む光 (柔らかい複数レイヤー)
+      g.fillStyle(0xfff8d0, 0.055);
+      g.fillTriangle(wx + ww/2 - 60, wy + wh, wx + ww/2 + 60, wy + wh, GW/2 + 40, GH);
+      g.fillStyle(0xfff4c0, 0.045);
+      g.fillTriangle(wx + ww/2 - 40, wy + wh, wx + ww/2 + 80, wy + wh, GW/2 + 100, GH);
+      g.fillStyle(0xfffce8, 0.035);
+      g.fillTriangle(wx + ww/2 - 80, wy + wh, wx + ww/2 + 20, wy + wh, GW/2 - 40, GH);
+    }
+
+    // 窓枠 (木製, 詳細)
+    const frameC = night ? 0x1e1a30 : 0x9a7040;
+    const frameHi = night ? 0x282444 : 0xb08858;
+    const frameSh = night ? 0x14103a : 0x6a4a20;
+    g.fillStyle(frameC);
+    // 外枠
+    g.fillRect(wx, wy, ww, 6);
+    g.fillRect(wx, wy + wh - 6, ww, 6);
+    g.fillRect(wx, wy, 6, wh);
+    g.fillRect(wx + ww - 6, wy, 6, wh);
+    // 内十字
+    g.fillRect(wx + ww/2 - 3, wy, 6, wh);
+    g.fillRect(wx, wy + wh/2 - 3, ww, 6);
+    // ハイライト
+    g.fillStyle(frameHi);
+    g.fillRect(wx, wy, ww, 1);
+    g.fillRect(wx, wy, 1, wh);
+    // 窓台 (出っ張り)
+    g.fillStyle(night ? 0x201c38 : 0xc09860);
+    g.fillRect(wx - 6, wy + wh - 2, ww + 12, 10);
+    g.fillStyle(night ? 0x181428 : 0xe0c090);
+    g.fillRect(wx - 6, wy + wh - 2, ww + 12, 4);
+    g.fillStyle(night ? 0x100e20 : 0x9a7840);
+    g.fillRect(wx - 6, wy + wh + 7, ww + 12, 3);
+  }
+
+  _drawCurtains(g, wx, wy, ww, wh, night) {
+    const cw = 30;  // カーテン幅
+    // 左カーテン
+    const lc = night ? 0x2a1e44 : 0xd4b8e0;
+    const lcD = night ? 0x1e1638 : 0xb898c8;
+    const lcH = night ? 0x3a2858 : 0xe8d0f0;
+    // カーテンの波
+    for (let fold = 0; fold < 4; fold++) {
+      const fc = fold % 2 === 0 ? lc : lcD;
+      g.fillStyle(fc);
+      g.fillRect(wx - 4 + fold * 7, wy - 4, 8, wh + 14);
+    }
+    g.fillStyle(lcH, 0.5);
+    g.fillRect(wx - 4, wy - 4, 3, wh + 14);
+    // 右カーテン
+    const ox = wx + ww - cw + 4;
+    for (let fold = 0; fold < 4; fold++) {
+      const fc = fold % 2 === 0 ? lc : lcD;
+      g.fillStyle(fc);
+      g.fillRect(ox + fold * 7, wy - 4, 8, wh + 14);
+    }
+    g.fillStyle(lcH, 0.5);
+    g.fillRect(ox + cw - 7, wy - 4, 3, wh + 14);
+    // カーテンレール
+    g.fillStyle(night ? 0x302840 : 0xa08060);
+    g.fillRect(wx - 14, wy - 6, ww + 28, 5);
+    // レールの止め具
+    g.fillStyle(night ? 0x484060 : 0xd0b080);
+    g.fillRect(wx - 14, wy - 7, 6, 7);
+    g.fillRect(wx + ww + 8, wy - 7, 6, 7);
+  }
+
+  _drawWallDeco(g, night) {
+    // 絵 (左壁)
+    this._drawPicture(g, 92, 22, night);
+    // 小さな飾り棚 (右壁, 机の上)
+    this._drawWallShelf(g, 484, 30, night);
+  }
+
+  _drawPicture(g, x, y, night) {
+    const fw = 68, fh = 82;
+    // フレーム
+    const frameC = night ? 0x2a2040 : 0x9a7440;
+    g.fillStyle(frameC);
+    g.fillRect(x, y, fw, fh);
+    // 内側マット
+    const matC = night ? 0x201830 : 0xf0e8d0;
+    g.fillStyle(matC);
+    g.fillRect(x + 5, y + 5, fw - 10, fh - 10);
+    // 絵の内容 (山と木のシルエット)
+    if (!night) {
+      // 空
+      g.fillStyle(0xa8d8f4);
+      g.fillRect(x + 5, y + 5, fw - 10, fh - 10);
+      // 山
+      g.fillStyle(0x8898a0);
+      g.fillTriangle(x + 14, y + fh - 12, x + 30, y + 25, x + 46, y + fh - 12);
+      g.fillStyle(0xa0acb0);
+      g.fillTriangle(x + 28, y + fh - 12, x + 42, y + 34, x + 56, y + fh - 12);
+      // 雪
+      g.fillStyle(0xf4f4f8);
+      g.fillTriangle(x + 28, y + 25, x + 22, y + 36, x + 34, y + 36);
+      // 木
+      g.fillStyle(0x3c5c28);
+      g.fillRect(x + 10, y + fh - 22, 5, 10);
+      g.fillCircle(x + 13, y + fh - 24, 7);
+    } else {
+      // 夜: 絵が暗く見える
+      g.fillStyle(0x141028);
+      g.fillRect(x + 5, y + 5, fw - 10, fh - 10);
+      g.fillStyle(0x1c1838, 0.8);
+      g.fillTriangle(x + 14, y + fh - 12, x + 30, y + 25, x + 46, y + fh - 12);
+    }
+    // フレームのベベル
+    bevel(g, x, y, fw, fh, night ? 0x3a2e54 : 0xc09860, night ? 0x1c1630 : 0x6a4820);
+  }
+
+  _drawWallShelf(g, x, y, night) {
+    const sw = 110, sd = 18;
+    // 棚板
+    g.fillStyle(night ? 0x1e1a30 : 0xb08848);
+    g.fillRect(x, y, sw, sd);
+    bevel(g, x, y, sw, sd, night ? 0x2a2440 : 0xd0a860, night ? 0x14102a : 0x7a5820);
+    woodGrainV(g, x, y, sw, sd, night ? 0x14102a : 0x7a5820, 0.15);
+
+    // 棚の上の小物
+    if (!night) {
+      // 小さな本 x2
+      g.fillStyle(0xa870a0); g.fillRect(x + 6, y - 20, 10, 20);
+      g.fillStyle(0x9860a0); g.fillRect(x + 6, y - 20, 3, 20);
+      g.fillStyle(0x70a870); g.fillRect(x + 18, y - 22, 10, 22);
+      g.fillStyle(0x60a860); g.fillRect(x + 18, y - 22, 3, 22);
+      g.fillStyle(0xd09060); g.fillRect(x + 30, y - 18, 8, 18);
+      g.fillStyle(0xc08050); g.fillRect(x + 30, y - 18, 3, 18);
+      // 小さな置物 (丸いオブジェクト)
+      g.fillStyle(0xc8d8e0);
+      g.fillCircle(x + 54, y - 8, 9);
+      g.fillStyle(0xe0ecf4);
+      g.fillCircle(x + 51, y - 11, 4);
+      // キャンドル
+      g.fillStyle(0xf0e8d0); g.fillRect(x + 72, y - 18, 8, 18);
+      g.fillStyle(0xffe090); g.fillRect(x + 75, y - 22, 3, 6);
+      g.fillStyle(0xfff4a0, 0.4); g.fillCircle(x + 76, y - 22, 8);
+      g.fillStyle(0xf8e8c8, 0.2); g.fillCircle(x + 76, y - 22, 14);
+    } else {
+      // 夜: 小物が暗く
+      g.fillStyle(0x1e1438); g.fillRect(x + 6, y - 20, 10, 20);
+      g.fillStyle(0x1a1030); g.fillRect(x + 18, y - 22, 10, 22);
+      g.fillStyle(0x221840); g.fillRect(x + 30, y - 18, 8, 18);
+      g.fillStyle(0x282040); g.fillCircle(x + 54, y - 8, 9);
+      // キャンドルだけ灯っている
+      g.fillStyle(0x281e18); g.fillRect(x + 72, y - 18, 8, 18);
+      g.fillStyle(0xffb840); g.fillRect(x + 75, y - 24, 2, 4);
+      g.fillStyle(0xffd060, 0.5); g.fillCircle(x + 76, y - 22, 6);
+      g.fillStyle(0xff9820, 0.2); g.fillCircle(x + 76, y - 22, 12);
+    }
+    // 棚の支柱
+    g.fillStyle(night ? 0x1e1a30 : 0xb08848);
+    g.fillRect(x + 4, y, 4, 18);
+    g.fillRect(x + sw - 8, y, 4, 18);
+  }
+
+  _drawClock(g, cx, cy, night) {
+    // 文字盤
+    g.fillStyle(night ? 0x1c1a30 : 0xf8f0dc);
+    g.fillCircle(cx, cy, 26);
+    // フレーム
+    g.fillStyle(night ? 0x38344c : 0xb89050);
+    for (let i = 0; i < 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      g.fillRect(cx + Math.cos(a) * 24 - 1, cy + Math.sin(a) * 24 - 1, 3, 3);
+    }
+    g.fillStyle(night ? 0x1c1a30 : 0xf8f0dc);
+    g.fillCircle(cx, cy, 23);
+    // 目盛り
+    g.fillStyle(night ? 0x484468 : 0xa08848);
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
+      const r1 = 18, r2 = i % 3 === 0 ? 13 : 15;
+      g.fillRect(cx + Math.cos(a) * r1 - 1, cy + Math.sin(a) * r1 - 1, 2, 2);
+    }
+    // 針
+    g.lineStyle(2, night ? 0x6868a0 : 0x604838);
+    g.lineBetween(cx, cy, cx - 10, cy - 13);
+    g.lineBetween(cx, cy, cx + 4, cy - 17);
+    g.fillStyle(night ? 0x8080b8 : 0x907850);
+    g.fillCircle(cx, cy, 2);
+  }
+
+  // ─────────────────────────────────────────
+  //  家具の描画
+  // ─────────────────────────────────────────
+  drawObjects(night, anomaly) {
+    const g = this.gObj;
+    g.clear();
+    const t = this.time.now;
+
+    this.hitBed   = { x: 38,  y: WALL_Y + 5,  w: 186, h: 110 };
+    this.hitDesk  = { x: 432, y: WALL_Y + 2,  w: 200, h: 110 };
+    this.hitPlant = { x: 50,  y: WALL_Y + 136, w: 84,  h: 114 };
+
+    this._drawBed(g, 38,  WALL_Y + 5,  night, anomaly === 'bed',   t);
+    this._drawNightstand(g, 228, WALL_Y + 10, night);
+    this._drawDesk(g, 432, WALL_Y + 5,  night, anomaly === 'desk',  t);
+    this._drawBookshelf(g, 576, WALL_Y + 5,  night);
+    this._drawPlant(g, 50,  WALL_Y + 136, night, anomaly === 'plant', t);
+  }
+
+  _drawBed(g, x, y, night, anom, t) {
+    const W = 186, H = 110;
+    const wdH = night ? 0x2e2448 : 0xc49a58;
+    const wdM = night ? 0x201838 : 0x9a7030;
+    const wdL = night ? 0x14102a : 0x6e4c18;
+    const wdD = night ? 0x0e0c1e : 0x4e3010;
+
+    // ── ベッドフレーム (サイド)
+    g.fillStyle(wdM);
+    g.fillRect(x, y + 30, W, H - 30);
+
+    // ── 頭板 (詳細)
+    g.fillStyle(wdM);
+    g.fillRect(x, y, W, 34);
+    // 頭板のパネル装飾
+    g.fillStyle(wdL);
+    g.fillRect(x + 6,  y + 6,  W/2 - 10, H/2 - 24);
+    g.fillRect(x + W/2 + 4, y + 6,  W/2 - 10, H/2 - 24);
+    bevel(g, x + 6,  y + 6,  W/2 - 10, H/2 - 24, wdH, wdD, 1);
+    bevel(g, x + W/2 + 4, y + 6, W/2 - 10, H/2 - 24, wdH, wdD, 1);
+    // 木目
+    woodGrainV(g, x, y, W, 34, wdD, 0.2);
+    bevel(g, x, y, W, 34, wdH, wdD);
+
+    // ── 足板
+    g.fillStyle(wdM);
+    g.fillRect(x, y + H - 12, W, 12);
+    bevel(g, x, y + H - 12, W, 12, wdH, wdD, 1);
+
+    // ── シーツ (布団の下)
+    const sheetC = night ? 0x282038 : 0xf8f0e0;
+    g.fillStyle(sheetC);
+    g.fillRect(x + 5, y + 30, W - 10, H - 40);
+
+    // ── 掛け布団 (千鳥格子)
+    const blkA = night ? (anom ? 0x3a2a60 : 0x221c3a) : (anom ? 0xb898d4 : 0xb09878);
+    const blkB = night ? (anom ? 0x2e2050 : 0x1c1630) : (anom ? 0xa080c4 : 0x9a8268);
+    g.fillStyle(blkA);
+    g.fillRect(x + 5, y + 36, W - 10, H - 52);
+
+    if (!night || !anom) {
+      // 格子模様
+      for (let qx = x + 5; qx < x + W - 10; qx += 16) {
+        for (let qy = y + 36; qy < y + H - 16; qy += 16) {
+          if (((qx - x) / 16 + (qy - y - 36) / 16) % 2 === 0) {
+            g.fillStyle(blkB);
+            g.fillRect(qx, qy, 16, 16);
+          }
+        }
+      }
+    }
+
+    // 布団の折り返し
+    g.fillStyle(night ? (anom ? 0x342258 : 0x261e44) : (anom ? 0xdcc0f0 : 0xe8dcc4));
+    g.fillRect(x + 5, y + 36, W - 10, 14);
+
+    // ── 枕
+    const plwC  = night ? (anom ? 0x5a4878 : 0x302848) : 0xf4ead0;
+    const plwH  = night ? (anom ? 0x6a58a0 : 0x403860) : 0xfffcf0;
+    const plwSh = night ? (anom ? 0x3c3060 : 0x201c38) : 0xdccaa8;
+    if (anom) {
+      // 枕が逆端に移動
+      g.fillStyle(plwC);
+      g.fillRect(x + 102, y + 33, 72, 22);
+      bevel(g, x + 102, y + 33, 72, 22, plwH, plwSh, 1);
+      if (night) {
+        // 元の位置の薄い跡
+        g.fillStyle(0x24183c, 0.5);
+        g.fillRect(x + 12, y + 33, 72, 22);
+        outline(g, x + 12, y + 33, 72, 22, 0x3c2e60);
+      }
+    } else {
+      // 枕2つ
+      g.fillStyle(plwC);
+      g.fillRect(x + 10, y + 33, 64, 22);
+      g.fillRect(x + 80, y + 33, 60, 22);
+      bevel(g, x + 10, y + 33, 64, 22, plwH, plwSh, 1);
+      bevel(g, x + 80, y + 33, 60, 22, plwH, plwSh, 1);
+      // 枕の模様 (小さな刺繍風)
+      if (!night) {
+        g.fillStyle(0xe0d0b4);
+        g.fillRect(x + 36, y + 43, 14, 1);
+        g.fillRect(x + 43, y + 36, 1, 14);
+        g.fillRect(x + 106, y + 43, 14, 1);
+      }
+    }
+
+    // 異常グロー
+    if (anom && night) {
+      const a = 0.06 + Math.sin(t / 820) * 0.04;
+      g.fillStyle(0x8060c8, a);
+      g.fillRect(x - 8, y - 6, W + 16, H + 12);
+    }
+  }
+
+  _drawNightstand(g, x, y, night) {
+    const W = 54, H = 66;
+    const wdH = night ? 0x282040 : 0xc49058;
+    const wdM = night ? 0x1c1630 : 0x9a7030;
+    const wdL = night ? 0x14102a : 0x6e4c18;
+
+    // 本体
+    g.fillStyle(wdM);
+    g.fillRect(x, y + 8, W, H - 8);
+    woodGrainV(g, x, y + 8, W, H - 8, wdL, 0.18);
+    bevel(g, x, y + 8, W, H - 8, wdH, wdL);
+
+    // 天板
+    g.fillStyle(night ? 0x221c38 : 0xb08840);
+    g.fillRect(x - 2, y, W + 4, 10);
+    bevel(g, x - 2, y, W + 4, 10, wdH, night ? 0x100c20 : 0x7a5820, 1);
+
+    // 引き出し
+    g.fillStyle(night ? 0x201838 : 0x8a6028);
+    g.fillRect(x + 4, y + 20, W - 8, 18);
+    bevel(g, x + 4, y + 20, W - 8, 18, wdH, wdL, 1);
+    // 引き出しのノブ
+    g.fillStyle(night ? 0x484060 : 0xd4a850);
+    g.fillCircle(x + W/2, y + 29, 4);
+    g.fillStyle(night ? 0x5a5080 : 0xf0c870);
+    g.fillCircle(x + W/2 - 1, y + 28, 2);
+
+    // 天板の上: お茶カップ
+    if (!night) {
+      // ソーサー
+      g.fillStyle(0xf0e8d0);
+      g.fillRect(x + 8, y - 4, 22, 4);
+      // カップ
+      g.fillStyle(0xf8f4ec);
+      g.fillRect(x + 12, y - 14, 14, 10);
+      g.fillStyle(0xe8dcc4);
+      g.fillRect(x + 12, y - 14, 14, 2);
+      // 取っ手
+      g.fillStyle(0xf0e8d0);
+      g.fillRect(x + 26, y - 12, 4, 6);
+      // 湯気
+      g.fillStyle(0xffffff, 0.3);
+      g.fillRect(x + 16, y - 20, 2, 5);
+      g.fillRect(x + 21, y - 22, 2, 5);
+    } else {
+      // 夜: カップが暗く
+      g.fillStyle(0x201c30);
+      g.fillRect(x + 8, y - 4, 22, 4);
+      g.fillStyle(0x1a1628);
+      g.fillRect(x + 12, y - 14, 14, 10);
+    }
+  }
+
+  _drawDesk(g, x, y, night, anom, t) {
+    const W = 140, H = 100;
+    const wdH = night ? 0x2c2244 : 0xc49058;
+    const wdM = night ? 0x201838 : 0x9a7030;
+    const wdL = night ? 0x14102a : 0x6e4c18;
+    const wdD = night ? 0x0e0a1e : 0x4a3010;
+
+    // 脚
+    g.fillStyle(wdL);
+    g.fillRect(x + 6,   y + 18, 12, 82);
+    g.fillRect(x + W - 18, y + 18, 12, 82);
+    woodGrainV(g, x + 6, y + 18, 12, 82, wdD, 0.25);
+    woodGrainV(g, x + W - 18, y + 18, 12, 82, wdD, 0.25);
+
+    // 天板
+    g.fillStyle(wdM);
+    g.fillRect(x, y, W, 18);
+    // 天板の縁
+    g.fillStyle(wdL);
+    g.fillRect(x, y + 16, W, 5);
+    woodGrainV(g, x, y, W, 18, wdD, 0.18);
+    bevel(g, x, y, W, 18, wdH, wdD);
+
+    // 引き出し (中段)
+    g.fillStyle(wdL);
+    g.fillRect(x + 10, y + 32, W - 20, 20);
+    bevel(g, x + 10, y + 32, W - 20, 20, wdM, wdD, 1);
+    // ノブ
+    g.fillStyle(night ? 0x484060 : 0xd4a850);
+    g.fillCircle(x + W/2, y + 42, 4);
+    g.fillStyle(night ? 0x5c5490 : 0xf0c870);
+    g.fillCircle(x + W/2 - 1, y + 41, 2);
+
+    // ── 天板の上の小物 ──
+
+    // 本の束 (左側)
+    const bookColors = night
+      ? [0x2a2048, 0x1e1840, 0x281e50, 0x1c1638]
+      : [0x9870b8, 0x70a870, 0xd48858, 0x6888b8];
+    for (let i = 0; i < 4; i++) {
+      g.fillStyle(bookColors[i]);
+      g.fillRect(x + 8 + i * 14, y - 20 - (i === 2 ? 4 : 0), 12, 20 + (i === 2 ? 4 : 0));
+      g.fillStyle(night ? 0x382e60 : 0xb898d8);
+      if (i === 0) {
+        g.fillRect(x + 8, y - 20, 3, 20);
+      }
+    }
+
+    // ── 本 (異常オブジェクト) ──
+    if (anom) {
+      // 本が勝手に開かれている
+      const pC  = night ? 0x3c2e66 : 0xc8a8e0;
+      const pgC = night ? 0x302458 : 0xf4ecf8;
+      const spC = night ? 0x281e4e : 0x9878b8;
+      g.fillStyle(pC);
+      g.fillRect(x + 48, y - 26, 46, 24); // 左ページ
+      g.fillRect(x + 96, y - 26, 46, 24); // 右ページ
+      g.fillStyle(pgC);
+      g.fillRect(x + 50, y - 24, 42, 20);
+      g.fillRect(x + 98, y - 24, 42, 20);
+      g.fillStyle(spC);
+      g.fillRect(x + 93, y - 26, 6, 24);
+      // 文字の痕
+      g.fillStyle(night ? 0x604880 : 0x907098, 0.75);
+      for (let i = 0; i < 3; i++) {
+        g.fillRect(x + 54, y - 21 + i * 6, 34, 1);
+        g.fillRect(x + 102, y - 21 + i * 6, 34, 1);
+      }
+      if (anom && night) {
+        const a = 0.06 + Math.sin(t / 900) * 0.04;
+        g.fillStyle(0x6050c0, a);
+        g.fillRect(x - 8, y - 36, W + 16, H + 46);
+      }
+    } else {
+      // 本が閉じている
+      g.fillStyle(night ? 0x282054 : 0xa888d0);
+      g.fillRect(x + 60, y - 22, 36, 20);
+      g.fillStyle(night ? 0x1e1840 : 0x8870b8);
+      g.fillRect(x + 60, y - 22, 5, 20);
+      g.fillStyle(night ? 0x342860 : 0xc0a0e0, 0.5);
+      g.fillRect(x + 60, y - 23, 36, 1);
+    }
+
+    // 鉛筆立て
+    const pcC = night ? 0x241c38 : 0x8898c0;
+    g.fillStyle(pcC);
+    g.fillRect(x + W - 28, y - 22, 20, 22);
+    g.fillStyle(night ? 0x181428 : 0x7488b0);
+    g.fillRect(x + W - 28, y - 22, 20, 3);
+    // 鉛筆
+    g.fillStyle(night ? 0x383060 : 0xf0d060); g.fillRect(x + W - 24, y - 34, 4, 14);
+    g.fillStyle(night ? 0x404080 : 0x48a848); g.fillRect(x + W - 18, y - 30, 4, 10);
+    g.fillStyle(night ? 0x2c2848 : 0xe06040); g.fillRect(x + W - 12, y - 36, 4, 16);
+    // 鉛筆の先
+    g.fillStyle(night ? 0x302a50 : 0xd4b848); g.fillRect(x + W - 24, y - 36, 4, 3);
+
+    // ランプ
+    this._drawLamp(g, x + W - 44, y - 50, night);
+  }
+
+  _drawLamp(g, x, y, night) {
+    // ベース
+    const baseC = night ? 0x201828 : 0xb0a890;
+    g.fillStyle(baseC);
+    g.fillRect(x - 6, y + 50, 16, 6);
+    g.fillStyle(night ? 0x181420 : 0xc8c0a8);
+    g.fillRect(x - 3, y + 46, 10, 6);
+    // ポール
+    g.fillStyle(night ? 0x1c1828 : 0xb8b0a0);
+    g.fillRect(x + 1, y + 8, 5, 40);
+    g.fillStyle(night ? 0x242038 : 0xd4ccb8);
+    g.fillRect(x + 1, y + 8, 2, 40);
+    // シェード
+    const shC = night ? 0x2a2040 : 0xe8c870;
+    const shH = night ? 0x382e54 : 0xf8e088;
+    const shS = night ? 0x1c1630 : 0xc0a040;
+    g.fillStyle(shC);
+    g.fillTriangle(x - 14, y + 10, x + 18, y + 10, x + 3, y - 12);
+    g.fillStyle(shS);
+    g.fillRect(x - 14, y + 8, 32, 3);
+    g.fillStyle(shH, 0.5);
+    g.fillTriangle(x - 14, y + 10, x - 6, y + 10, x + 3, y - 12);
+    // ランプの光
+    if (!night) {
+      g.fillStyle(0xfff8b0, 0.16);
+      g.fillCircle(x + 3, y + 20, 40);
+      g.fillStyle(0xfff0a0, 0.09);
+      g.fillCircle(x + 3, y + 20, 65);
+    }
+  }
+
+  _drawBookshelf(g, x, y, night) {
+    const W = 58, H = 172;
+    const wdH = night ? 0x2a2044 : 0xc49058;
+    const wdM = night ? 0x1e1a36 : 0x9a7030;
+    const wdL = night ? 0x14102a : 0x6e4c18;
+    const wdD = night ? 0x0e0a1e : 0x4a3010;
+
+    // 本体
+    g.fillStyle(wdM);
+    g.fillRect(x, y, W, H);
+    woodGrainV(g, x, y, W, H, wdD, 0.14);
+    bevel(g, x, y, W, H, wdH, wdD);
+
+    // 棚板 x3
+    const shelves = [y + 44, y + 92, y + 138];
+    for (const sy of shelves) {
+      g.fillStyle(wdL);
+      g.fillRect(x + 2, sy, W - 4, 6);
+      g.fillStyle(wdH, 0.5);
+      g.fillRect(x + 2, sy, W - 4, 1);
+    }
+
+    // 本
+    const allBooks = night
+      ? [
+          [0x2a2450, 10], [0x20183a, 14], [0x28204c, 12],
+          [0x241e48, 9], [0x1e1840, 16], [0x2c2454, 11],
+          [0x221c44, 13], [0x281e4e, 10], [0x201a3e, 15],
+        ]
+      : [
+          [0x9060b0, 10], [0x60a870, 14], [0xd48040, 12],
+          [0x5888c8, 9],  [0xb04060, 16], [0xa07030, 11],
+          [0x40a0a0, 13], [0xd06090, 10], [0x8060c0, 15],
+        ];
+
+    for (let s = 0; s < 3; s++) {
+      const sy = shelves[s] - 36;
+      let bx = x + 4;
+      for (let b = s * 3; b < s * 3 + 3; b++) {
+        if (b >= allBooks.length) break;
+        const [col, bh] = allBooks[b];
+        g.fillStyle(col);
+        g.fillRect(bx, sy + (36 - bh), 14, bh);
+        bevel(g, bx, sy + (36 - bh), 14, bh,
+          night ? 0x382e5e : 0xe0c0e8,
+          night ? 0x141028 : 0x604880, 1);
+        bx += 15;
+      }
+    }
+
+    // 一番上の棚: 小さな植物
+    if (!night) {
+      g.fillStyle(0xc05030); g.fillRect(x + 18, y + 4, 22, 16);
+      g.fillStyle(0xd06040); g.fillRect(x + 18, y + 4, 22, 4);
+      g.fillStyle(0x5a9030); g.fillCircle(x + 29, y, 12);
+      g.fillStyle(0x72b840, 0.7); g.fillCircle(x + 25, y - 4, 8);
+    } else {
+      g.fillStyle(0x1e100a); g.fillRect(x + 18, y + 4, 22, 16);
+      g.fillStyle(0x142008); g.fillCircle(x + 29, y, 12);
+    }
+  }
+
+  _drawPlant(g, x, y, night, anom, t) {
+    // 皿
+    const saucerC = night ? 0x201610 : 0xd8c0a0;
+    g.fillStyle(saucerC);
+    g.fillRect(x + 4, y + 86, 60, 6);
+    g.fillStyle(night ? 0x181008 : 0xf0e0c0);
+    g.fillRect(x + 6, y + 86, 56, 2);
+
+    // 鉢 (テラコッタ)
+    const potM = night ? 0x2c1610 : 0xd06040;
+    const potH = night ? 0x3a1e14 : 0xe87858;
+    const potL = night ? 0x1e0e08 : 0xa84020;
+
+    if (anom) {
+      // 異常: 鉢が傾いた位置に
+      g.fillStyle(potM);
+      g.fillRect(x + 14, y + 62, 46, 26);
+      g.fillRect(x + 10, y + 60, 54, 8);
+    } else {
+      g.fillStyle(potM);
+      g.fillRect(x + 10, y + 62, 50, 26);
+      g.fillRect(x + 6,  y + 60, 58, 8);
+    }
+    // 鉢の帯模様
+    g.fillStyle(night ? 0x1a0c06 : 0x884820);
+    g.fillRect(x + 10, y + 74, 50, 4);
+    g.fillStyle(night ? 0x381a10 : 0xf09060, 0.5);
+    g.fillRect(x + 10, y + 76, 50, 2);
+    // 鉢のベベル
+    bevel(g, x + 10, y + 62, 50, 26, potH, potL, 1);
+
+    // 土
+    g.fillStyle(night ? 0x14100c : 0x5a3818);
+    g.fillRect(x + 12, y + 62, 46, 10);
+    g.fillStyle(night ? 0x1a1410 : 0x7a5030, 0.5);
+    g.fillRect(x + 16, y + 64, 38, 5);
+
+    // 茎
+    g.fillStyle(night ? 0x182808 : 0x4a7c28);
+    g.fillRect(x + 34, y + 16, 4, 50);
+    g.fillStyle(night ? 0x102004 : 0x3a6018);
+    g.fillRect(x + 36, y + 16, 1, 50);
+
+    // 葉
+    if (anom) {
+      // 異常: 全部こちら向き
+      const lH = night ? 0x102008 : 0x5a9030;
+      const lM = night ? 0x0c1806 : 0x3e7018;
+      const lL = night ? 0x081204 : 0x285008;
+      g.fillStyle(lM); g.fillCircle(x + 22, y + 34, 26);
+      g.fillStyle(lH); g.fillCircle(x + 18, y + 28, 18);
+      g.fillStyle(lL); g.fillCircle(x + 20, y + 50, 16);
+      g.fillStyle(lM); g.fillCircle(x + 40, y + 26, 14);
+    } else {
+      const lH = night ? 0x1e3810 : 0x78b840;
+      const lM = night ? 0x122408 : 0x5a9028;
+      const lL = night ? 0x0c1804 : 0x3a6010;
+      const lHi = night ? 0x243010 : 0x96d050;
+      g.fillStyle(lM);
+      g.fillCircle(x + 30, y + 28, 28);
+      g.fillStyle(lL);
+      g.fillCircle(x + 50, y + 24, 20);
+      g.fillStyle(lM);
+      g.fillCircle(x + 16, y + 22, 18);
+      g.fillStyle(lH);
+      g.fillCircle(x + 26, y + 22, 14);
+      g.fillCircle(x + 44, y + 18, 10);
+      // ハイライト
+      g.fillStyle(lHi, 0.5);
+      g.fillCircle(x + 24, y + 20, 7);
+      g.fillCircle(x + 44, y + 16, 5);
+    }
+
+    // 異常グロー
+    if (anom && night) {
+      const a = 0.08 + Math.sin(t / 760) * 0.05;
+      g.fillStyle(0x205820, a);
+      g.fillCircle(x + 35, y + 45, 60);
+    }
+  }
+
+  // ─────────────────────────────────────────
+  //  プレイヤー (ちびキャラ)
+  // ─────────────────────────────────────────
+  drawPlayer(night, step) {
+    const g = this.gPlayer;
+    g.clear();
+    const px = Math.round(this.playerX);
+    const py = Math.round(this.playerY);
+
+    const skin   = night ? 0xd0a888 : 0xf0c8a0;
+    const skinSh = night ? 0xb09070 : 0xd4a880;
+    const hair   = night ? 0x2a1c14 : 0x3c2618;
+    const hairH  = night ? 0x3e2c20 : 0x5a3a28;
+    const shirt  = night ? 0x3a4858 : 0x6898c8;
+    const shirtH = night ? 0x4a5870 : 0x88b8e0;
+    const shirtS = night ? 0x28384a : 0x4878a8;
+    const pants  = night ? 0x283040 : 0x484e70;
+    const shoe   = night ? 0x141318 : 0x2c2020;
+    const cheek  = night ? 0x8c5060 : 0xf0a090;
+
+    // 影
+    g.fillStyle(0x000000, 0.1);
+    g.fillEllipse(px, py + 18, 32, 10);
+
+    // 脚
+    g.fillStyle(pants);
+    g.fillRect(px - 9, py + 4 + (step ? 1 : 0), 8, 12);
+    g.fillRect(px + 1, py + 4 + (step ? 0 : 1), 8, 12);
+    // 靴
+    g.fillStyle(shoe);
+    g.fillRect(px - 11 + (step ? 2 : 0), py + 16, 10, 4);
+    g.fillRect(px + 1  + (step ? 0 : 2), py + 16, 10, 4);
+    // 靴のハイライト
+    g.fillStyle(night ? 0x1e1a20 : 0x4a3838, 0.5);
+    g.fillRect(px - 11 + (step ? 2 : 0), py + 16, 4, 2);
+
+    // 胴体
+    g.fillStyle(shirt);
+    g.fillRect(px - 10, py - 8, 20, 14);
+    // 胴体ハイライト/シャドウ
+    g.fillStyle(shirtH);
+    g.fillRect(px - 10, py - 8, 5, 14);
+    g.fillStyle(shirtS);
+    g.fillRect(px + 8, py - 8, 2, 14);
+
+    // 腕
+    const swing = step ? 2 : -2;
+    g.fillStyle(shirt);
+    g.fillRect(px - 16, py - 6 + swing, 7, 11);
+    g.fillRect(px + 9,  py - 6 - swing, 7, 11);
+    g.fillStyle(shirtH, 0.5);
+    g.fillRect(px - 16, py - 6 + swing, 2, 11);
+
+    // 手
+    g.fillStyle(skin);
+    g.fillRect(px - 16, py + 4 + swing, 7, 4);
+    g.fillRect(px + 9,  py + 4 - swing, 7, 4);
+
+    // 頭 (大きめ、丸め)
+    g.fillStyle(skin);
+    g.fillRect(px - 9,  py - 24, 18, 18);
+    // 頭の角を丸く見せる
+    g.fillRect(px - 10, py - 22, 20, 14);
+    g.fillRect(px - 8,  py - 25, 16, 2);
+    // 頭のシャドウ
+    g.fillStyle(skinSh);
+    g.fillRect(px + 7, py - 24, 2, 18);
+    g.fillRect(px - 9, py - 7, 18, 2);
+
+    // 髪
+    g.fillStyle(hair);
+    g.fillRect(px - 10, py - 26, 20, 8);
+    g.fillRect(px - 11, py - 22, 4, 10); // 横
+    g.fillRect(px + 7,  py - 22, 4, 5);  // 横
+    g.fillStyle(hairH, 0.6);
+    g.fillRect(px - 6, py - 26, 8, 4);   // ハイライト
+
+    // 目 (大きめ、つぶらな)
+    g.fillStyle(night ? 0x181014 : 0x1a1014);
+    g.fillRect(px - 6, py - 16, 3, 4);
+    g.fillRect(px + 3, py - 16, 3, 4);
+    // 瞳のハイライト
+    g.fillStyle(0xffffff, 0.8);
+    g.fillRect(px - 6, py - 16, 1, 2);
+    g.fillRect(px + 3, py - 16, 1, 2);
+    // 目のふち
+    g.fillStyle(night ? 0x0e0a10 : 0x140e10);
+    g.fillRect(px - 7, py - 17, 5, 1);
+    g.fillRect(px + 2, py - 17, 5, 1);
+
+    // 頬
+    g.fillStyle(cheek, night ? 0.3 : 0.55);
+    g.fillRect(px - 8, py - 12, 3, 2);
+    g.fillRect(px + 5, py - 12, 3, 2);
+
+    // 口
+    if (!night) {
+      g.fillStyle(0xd88878);
+      g.fillRect(px - 1, py - 9, 4, 1);
+    }
+  }
+
+  // ─────────────────────────────────────────
+  //  UI
+  // ─────────────────────────────────────────
+  createUI() {
+    const D = 10;
+    this.uiTime = this.add.text(GW - 14, 10, '☀  昼間', {
+      fontFamily: "'MS Gothic','Courier New',monospace",
+      fontSize: '13px',
+      color: '#c8a050',
+    }).setOrigin(1, 0).setDepth(D);
+
+    this.uiMsgBg = this.add.graphics().setDepth(D);
+    this.uiMsgText = this.add.text(GW/2, GH - 70, '', {
+      fontFamily: "'MS Gothic','Courier New',monospace",
+      fontSize: '13px',
+      color: '#f4ead6',
+      align: 'center',
+      wordWrap: { width: GW - 90 },
+      lineSpacing: 7,
+    }).setOrigin(0.5, 0.5).setDepth(D);
+
+    this.uiPrompt = this.add.text(GW/2, GH - 152, '[ F ]  調べる', {
+      fontFamily: "'MS Gothic','Courier New',monospace",
+      fontSize: '12px',
+      color: '#b0a0d8',
+    }).setOrigin(0.5, 0.5).setDepth(D).setVisible(false);
+
+    this.uiDots = this.add.text(12, GH - 18, '', {
+      fontFamily: 'monospace', fontSize: '10px', color: '#8a6838',
+    }).setDepth(D);
+  }
+
+  showMsg(text, duration = 0, callback = null) {
+    const g = this.uiMsgBg;
+    g.clear();
+    // メッセージボックス (温かいトーン)
+    g.fillStyle(0x1a140e, 0.90);
+    g.fillRoundedRect(16, GH - 124, GW - 32, 108, 6);
+    g.lineStyle(1, 0x5a4028, 0.8);
+    g.strokeRoundedRect(16, GH - 124, GW - 32, 108, 6);
+    // 上辺のアクセントライン
+    g.lineStyle(1, 0xa07840, 0.4);
+    g.strokeRoundedRect(18, GH - 122, GW - 36, 104, 5);
+    this.uiMsgText.setText(text);
+
+    if (duration > 0) {
+      this.time.delayedCall(duration, () => {
+        this.hideMsg();
+        if (callback) callback();
+      });
+    }
+  }
+
+  hideMsg() {
+    this.uiMsgBg.clear();
+    this.uiMsgText.setText('');
+  }
+
+  // ─────────────────────────────────────────
+  //  ゲームフロー (変更なし)
+  // ─────────────────────────────────────────
+  startNight() {
+    if (this.state !== 'day') return;
+    this.state = 'transitioning';
+    const picks = ['bed', 'desk', 'plant'];
+    this.anomalyType = picks[Phaser.Math.Between(0, 2)];
+
+    this.tweens.add({
+      targets: this.nightVeil,
+      fillAlpha: 0.74,
+      duration: 4500,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        this.drawRoom(true);
+        this.drawObjects(true, this.anomalyType);
+        this.drawPlayer(true, 0);
+        this.state = 'night';
+        this.uiTime.setText('☾  夜').setColor('#9090c8');
+        this.uiDots.setText('');
+        this.showMsg('夜が来た。\n\n部屋のどこかが、おかしい。', 4000);
+      }
+    });
+  }
+
+  triggerEvent() {
+    if (this.state !== 'night') return;
+    this.state = 'event';
+    this.uiPrompt.setVisible(false);
+
+    const msgs = {
+      bed:   '枕が、逆を向いていた。\n\nそんなはずはない。\n今朝、自分で直したのに。\n\n誰が、いじったのだろう。',
+      desk:  '本が、開いていた。\n\n読んだ覚えはない。\nでも、そのページには\n見覚えのある筆跡があった。',
+      plant: '植物が、こちらを向いていた。\n\n植物は動かない。\nそれなのに、\n確かに向きが変わっていた。',
+    };
+
+    this.showMsg(msgs[this.anomalyType]);
+    this.time.delayedCall(6000, () => {
+      this.hideMsg();
+      this.time.delayedCall(1200, () => this.startMorning());
+    });
+  }
+
+  startMorning() {
+    this.state = 'morning';
+    this.uiPrompt.setVisible(false);
+    const veil = this.add.rectangle(GW/2, GH/2, GW, GH, 0xfff8f0, 0).setDepth(20);
+    this.tweens.add({
+      targets: veil, fillAlpha: 1, duration: 2200, ease: 'Sine.easeIn',
+      onComplete: () => {
+        this.nightVeil.setFillStyle(0x04030c, 0);
+        this.anomalyType = null;
+        this.drawRoom(false);
+        this.drawObjects(false, null);
+        this.drawPlayer(false, 0);
+        this.uiTime.setText('☀  昼間').setColor('#c8a050');
+        this.tweens.add({
+          targets: veil, fillAlpha: 0, duration: 2200, ease: 'Sine.easeOut',
+          onComplete: () => {
+            veil.destroy();
+            this.state = 'day';
+            this.showMsg('朝になった。\n\nまた、いつもの日常。', 3500);
+            this.scheduleDayToNight();
+          }
+        });
+      }
+    });
+  }
+
+  // ─────────────────────────────────────────
+  //  ヘルパー
+  // ─────────────────────────────────────────
+  distTo(b) {
+    return Phaser.Math.Distance.Between(
+      this.playerX, this.playerY,
+      b.x + b.w / 2, b.y + b.h / 2
+    );
+  }
+
+  isNearAnomaly() {
+    if (this.state !== 'night' || !this.anomalyType) return false;
+    const m = { bed: this.hitBed, desk: this.hitDesk, plant: this.hitPlant };
+    return this.distTo(m[this.anomalyType]) < 90;
+  }
+
+  // ─────────────────────────────────────────
+  //  更新ループ
+  // ─────────────────────────────────────────
+  update(time, delta) {
+    if (this.state === 'event' || this.state === 'morning' || this.state === 'transitioning') return;
+
+    const dt = delta / 1000;
+    const isNight = this.state === 'night';
+
+    const up   = this.cursors.up.isDown    || this.keyW.isDown;
+    const dn   = this.cursors.down.isDown  || this.keyS.isDown;
+    const lf   = this.cursors.left.isDown  || this.keyA.isDown;
+    const rt   = this.cursors.right.isDown || this.keyD.isDown;
+    const moving = up || dn || lf || rt;
+
+    const spd = isNight ? 108 : 128;
+    if (up) this.playerY -= spd * dt;
+    if (dn) this.playerY += spd * dt;
+    if (lf) this.playerX -= spd * dt;
+    if (rt) this.playerX += spd * dt;
+
+    this.playerX = Phaser.Math.Clamp(this.playerX, 18, GW - 18);
+    this.playerY = Phaser.Math.Clamp(this.playerY, WALL_Y + 22, GH - 18);
+
+    if (moving) {
+      this.walkTimer += delta;
+      if (this.walkTimer > 220) { this.walkStep = 1 - this.walkStep; this.walkTimer = 0; }
+    } else {
+      this.walkStep = 0;
+      this.walkTimer = 0;
+    }
+    this.drawPlayer(isNight, this.walkStep);
+
+    // 夜: 異常グローを定期再描画
+    if (isNight && this.anomalyType) {
+      if (!this._objRedrawAt || time - this._objRedrawAt > 200) {
+        this.drawObjects(true, this.anomalyType);
+        this._objRedrawAt = time;
+      }
+    }
+
+    const near = this.isNearAnomaly();
+    this.uiPrompt.setVisible(near);
+    if (near) this.uiPrompt.setAlpha(0.5 + Math.sin(time / 380) * 0.5);
+
+    if (near && (Phaser.Input.Keyboard.JustDown(this.keyF) || Phaser.Input.Keyboard.JustDown(this.keySPC))) {
+      this.triggerEvent();
+    }
+
+    if (this.state === 'day' && this.dayTimer && !this.dayTimer.hasDispatched) {
+      const n = Math.floor((1 - this.dayTimer.getRemaining() / DAY_DURATION) * 22);
+      this.uiDots.setText('·'.repeat(Math.max(0, n)));
+    }
+  }
+}
+
+new Phaser.Game({
+  type: Phaser.AUTO,
+  width: GW,
+  height: GH,
+  parent: 'game-wrapper',
+  backgroundColor: '#e8dfc8',
+  pixelArt: false,
+  scene: GameScene,
+});
+  </script>
+</body>
+</html>
