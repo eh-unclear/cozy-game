@@ -4,41 +4,158 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>やさしい日常 × 歪む夜</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@300;400&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+
     body {
-      background: #1e1610;
+      background: #0d0b08;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
-      font-family: 'MS Gothic', 'ＭＳ ゴシック', 'Courier New', monospace;
+      font-family: 'Share Tech Mono', 'MS Gothic', monospace;
+      overflow: hidden;
     }
+
+    /* ざらついた背景テクスチャ */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        radial-gradient(ellipse 80% 60% at 50% 40%, #2a1e0e 0%, #0d0b08 70%);
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    /* ノイズグレイン */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size: 200px 200px;
+      opacity: 0.35;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    #shell {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    /* 上部ヘッダー */
+    #header {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
     #title {
-      color: #c8a464;
-      font-size: 12px;
-      letter-spacing: 5px;
-      margin-bottom: 10px;
+      font-family: 'Noto Serif JP', serif;
+      font-weight: 300;
+      font-size: 15px;
+      letter-spacing: 8px;
+      color: #c8a05a;
+      text-shadow: 0 0 20px rgba(200, 140, 60, 0.4);
+      animation: titleFlicker 8s ease-in-out infinite;
     }
+
+    #title-sep {
+      color: #4a3010;
+      font-size: 10px;
+      letter-spacing: 3px;
+    }
+
+    @keyframes titleFlicker {
+      0%, 92%, 100% { opacity: 1; }
+      94% { opacity: 0.7; }
+      96% { opacity: 1; }
+      98% { opacity: 0.85; }
+    }
+
+    /* ゲームの外枠 — 古いテレビ風 */
     #game-wrapper {
-      border: 3px solid #4a3018;
-      border-radius: 10px;
+      position: relative;
+      border-radius: 12px;
       overflow: hidden;
       image-rendering: pixelated;
+      box-shadow:
+        0 0 0 2px #2a1c0a,
+        0 0 0 4px #1a1208,
+        0 0 40px rgba(180, 100, 20, 0.15),
+        0 0 80px rgba(0, 0, 0, 0.8),
+        inset 0 0 0 1px rgba(255, 200, 100, 0.05);
     }
+
+    /* スキャンライン */
+    #game-wrapper::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.06) 3px,
+        rgba(0, 0, 0, 0.06) 4px
+      );
+      pointer-events: none;
+      z-index: 100;
+      border-radius: 12px;
+    }
+
+    /* ヒント */
     #hint {
-      color: #4a3828;
+      margin-top: 14px;
+      color: #3a2a14;
       font-size: 10px;
-      letter-spacing: 2px;
-      margin-top: 8px;
+      letter-spacing: 3px;
+      font-family: 'Share Tech Mono', monospace;
+      transition: color 0.3s;
     }
+
+    #hint:hover {
+      color: #6a5030;
+    }
+
+    /* 左右のコーナーデコ */
+    #deco-left, #deco-right {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      color: #2a1c0a;
+      font-size: 9px;
+      letter-spacing: 1px;
+      writing-mode: vertical-rl;
+      line-height: 2;
+      opacity: 0.6;
+    }
+    #deco-left  { right: calc(100% + 18px); text-align: right; }
+    #deco-right { left:  calc(100% + 18px); }
   </style>
 </head>
 <body>
-  <div id="title">やさしい日常 &times; 歪む夜</div>
-  <div id="game-wrapper"></div>
-  <div id="hint">[ ↑↓←→ / WASD ] 移動　　[ F / Space ] 調べる</div>
+  <div id="shell">
+    <div id="header">
+      <span id="title">やさしい日常　×　歪む夜</span>
+    </div>
+    <div style="position:relative">
+      <span id="deco-left">︴︴ room ︴︴</span>
+      <div id="game-wrapper"></div>
+      <span id="deco-right">︴︴ night ︴︴</span>
+    </div>
+    <div id="hint">[ ↑↓←→ / WASD ] 移動　　[ F / Space ] 調べる</div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
   <script>
